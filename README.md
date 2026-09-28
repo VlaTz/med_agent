@@ -43,13 +43,6 @@ ROOT-ОРКЕСТРАТОР (метапромпт)
 наборе записей, а не опирались на данные, факт-чек которых происходит только постфактум. Это
 решение само залогировано как часть плана (см. `outputs/logs/*.jsonl`, фаза `plan`).
 
-## Почему контракт OpenAI, а не LiteLLM/LangGraph
-
-`src/llm.py` использует обычный SDK `openai`, а провайдер целиком задаётся через `.env`:
-`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` — ничего из этого не зашито в код. По умолчанию в
-`.env.example` эти три переменные указывают на OpenAI-совместимый endpoint Gemini
-(`https://generativelanguage.googleapis.com/v1beta/openai/`), но смена провайдера (реальный OpenAI,
-Azure OpenAI, локальный vLLM/Ollama-сервер) — это правка трёх строк в `.env`, а не кода.
 
 ## Структура репозитория
 
@@ -72,10 +65,8 @@ outputs/{logs,reports,figures}/
 ## Установка и запуск
 
 ```bash
-python -m venv .venv          # уже создано в этом репозитории
-.venv/Scripts/activate         # Windows; на macOS/Linux используйте source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env           # затем впишите LLM_API_KEY (по умолчанию -- Gemini, бесплатный тир: aistudio.google.com/apikey)
+cp .env.example .env           # затем впишите LLM_API_KEY (по умолчанию -- Gemini)
 
 python main.py                 # воспроизводимый прогон, логи делегирования/вызовов инструментов/скиллов в stdout + outputs/logs/
 streamlit run app.py           # интерактивный UI с живой трассировкой по шагам
