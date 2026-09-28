@@ -1,0 +1,119 @@
+# Harness для анализа исследований в митохондриальной медицине
+
+Прототип Harness, который превращает LLM в дисциплинированного научного аналитика по
+митохондриальной медицине: находит свежую литературу/исследования, извлекает структурированные
+данные, сравнивает митохондриально-таргетные терапии со стандартом лечения, оценивает
+перспективность каждого направления, проверяет каждую цитату и собирает мини-обзор с графиком и
+рейтингом.
+
+Область охвата этого прототипа (по заданию): **болезнь Паркинсона** и **LHON** vs стандарт
+лечения, митохондриально-таргетные антиоксиданты / модуляторы биогенеза-митофагии / генная терапия
+мтДНК, публикации и регистрации исследований примерно с 2021 года. Не систематический обзор, не
+клиническая рекомендация для конкретного пациента.
+
+## Архитектура
+
+```
+Запрос пользователя
+   │
+   ▼
+ROOT-ОРКЕСТРАТОР (метапромпт)
+ · разбирает область запроса, строит план (поиск → извлечение → ревью → сравнение → оценка → отчёт)
+ · делегирует каждый шаг одному субагенту, инжектируя только нужные ему /skills
+ · каждое решение логируется (outputs/logs/*.jsonl) и стримится в UI в реальном времени
+   │
+   ├─ 1. literature_searcher   → инструменты: pubmed.search_literature (Europe PMC), clinicaltrials.search_trials (CTGov v2)
+   ├─ 2. data_extractor        → скиллы: clinical_outcome_extraction_rules, evidence_level_scale
+   │                             инструмент: structured_parse → Pydantic StudyRecord
+   ├─ 3. reviewer_validator    → скилл: citation_validation_checklist
+   │                             инструмент: verify_citation (повторный запрос по PMID/DOI/NCT)
+   │                             отбрасывает записи с замечанием высокой серьёзности до того, как
+   │                             они повлияют на сравнение/рейтинг ниже
+   ├─ 4. comparator_analyst    → инструмент: sandbox.compare_arms / plot_effect_by_phase (matplotlib)
+   ├─ 5. perspective_scorer    → скиллы: perspective_criteria, evidence_level_scale
+   │                             инструмент: sandbox.plot_ranking
+   │
+   ▼
+ОРКЕСТРАТОР собирает FinalReport → отчёт в Markdown + графики + JSONL-лог
+```
+
+Про порядок шагов: иллюстративный порядок в задании — *поиск → извлечение → сравнение → оценка →
+визуализация → отчёт*. В этой реализации ревьюер-валидатор запускается сразу после извлечения, а
+не в конце — чтобы сравнение и оценка перспективности строились на уже проверенном по цитированию
+наборе записей, а не опирались на данные, факт-чек которых происходит только постфактум. Это
+решение само залогировано как часть плана (см. `outputs/logs/*.jsonl`, фаза `plan`).
+
+## Почему контракт OpenAI, а не LiteLLM/LangGraph
+
+`src/llm.py` использует обычный SDK `openai`, а провайдер целиком задаётся через `.env`:
+`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` — ничего из этого не зашито в код. По умолчанию в
+`.env.example` эти три переменные указывают на OpenAI-совместимый endpoint Gemini
+(`https://generativelanguage.googleapis.com/v1beta/openai/`), но смена провайдера (реальный OpenAI,
+Azure OpenAI, локальный vLLM/Ollama-сервер) — это правка трёх строк в `.env`, а не кода.
+
+## Структура репозитория
+
+```
+main.py                    CLI: воспроизводимый прогон 1-2 примеров запросов с полными логами
+app.py                     Streamlit UI: тот же harness, живая трасса агента по шагам
+src/
+  orchestrator.py          метапромпт, план, пайплайн, сборка отчёта
+  schemas.py                Pydantic-контракты (Plan, StudyRecord, ComparisonResult, ...)
+  llm.py                    клиент на контракте OpenAI (по умолчанию Gemini)
+  logging_utils.py          event bus -> JSONL-лог + live-колбэк для UI
+  i18n.py                   русские подписи для англоязычного enum/config-слоя (только отображение)
+  config.py                 область заболеваний/классов препаратов, примеры запросов
+  subagents/                по одному модулю на субагента (см. схему выше)
+  tools/                    pubmed.py, clinicaltrials.py, sandbox.py, cache.py
+skills/                     Markdown-файлы скиллов, подгружаемые в runtime нужному субагенту
+outputs/{logs,reports,figures}/
+```
+
+## Установка и запуск
+
+```bash
+python -m venv .venv          # уже создано в этом репозитории
+.venv/Scripts/activate         # Windows; на macOS/Linux используйте source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env           # затем впишите LLM_API_KEY (по умолчанию -- Gemini, бесплатный тир: aistudio.google.com/apikey)
+
+python main.py                 # воспроизводимый прогон, логи делегирования/вызовов инструментов/скиллов в stdout + outputs/logs/
+streamlit run app.py           # интерактивный UI с живой трассировкой по шагам
+```
+
+## Пример лога (фрагмент)
+
+```
+[orchestrator:plan:start]                               Строится план исследования
+[orchestrator:plan:end]                                  План готов: 6 шагов. Область охвата: ...
+[literature_searcher:search:tool_call]                   Поиск в Europe PMC: 'MitoQ Parkinson disease' -> 6 результатов
+[literature_searcher:search:tool_call]                   Поиск в ClinicalTrials.gov: Parkinson disease / urolithin A -> 0 результатов
+[data_extractor:extract:skill_loaded]                    Загружен скилл «clinical_outcome_extraction_rules»
+[data_extractor:extract:llm_call]                        extract_batch_1: структурированный ответ получен
+[reviewer_validator:review:tool_call]                    verify_citation(pmid=42163657)
+[reviewer_validator:review:end]                          Оставлено 9/10 записей, зафиксировано замечаний: 2
+[comparator_analyst:compare:tool_call]                   sandbox.plot_effect_by_phase('Parkinson's disease') -> effect_by_phase_parkinsons_disease.png
+[perspective_scorer:score:end]                           Ранжировано направлений: 3
+[orchestrator:report:end]                                Отчёт записан в outputs/reports/....md
+```
+
+Полные машиночитаемые логи лежат в `outputs/logs/<timestamp>_<query-slug>.jsonl`, по одному JSON-
+объекту на событие (actor, phase, event_type, message, data).
+
+## Известные ограничения
+
+- **Охват поиска**: только Europe PMC + ClinicalTrials.gov v2; без серой литературы, препринтов за
+  пределами индекса Europe PMC и не-англоязычных источников.
+- **Извлечение построено на LLM**, а не на валидированном NLP-пайплайне — шаг ревьюера-валидатора
+  существует именно для того, чтобы ограничить этот риск, а не устранить его полностью.
+- **Нет многошагового уточнения**: один запрос на входе — один отчёт на выходе, в рамках области
+  задания; UI пока не поддерживает уточняющие вопросы к уже готовому отчёту.
+- **Небольшой бюджет модели**: извлечение батчируется (6 записей за вызов) для контроля
+  задержки/стоимости — это снижает внимание к каждой отдельной записи ради пропускной способности.
+- **Баллы перспективности — эвристическое правило** (см. `skills/perspective_criteria.md`), а не
+  валидированная библиометрическая или клиническая модель — рейтинг стоит воспринимать как
+  структурированное, проверяемое мнение, а не как объективную истину.
+- **Отображение на русском — только слой представления**: сами данные (Pydantic-схемы, значения
+  enum'ов, названия заболеваний/классов препаратов в `config.py`) остаются на английском, так как
+  сверяются со извлечёнными из англоязычной литературы значениями; на русский переводятся только
+  подписи в UI, отчёте и графиках (см. `src/i18n.py`).
